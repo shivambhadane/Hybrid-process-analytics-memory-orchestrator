@@ -23,8 +23,8 @@ private:
     static constexpr double W_MEMORY     = 0.15;
     static constexpr double W_CPU        = 0.20;
 
-    static constexpr double HOT_THRESHOLD  = 70.0;
-    static constexpr double WARM_THRESHOLD = 40.0;
+    static constexpr double HOT_THRESHOLD  = 40.0;
+    static constexpr double WARM_THRESHOLD = 15.0;
 
     unique_ptr<IProcessCollector> collector;
 
@@ -159,17 +159,25 @@ public:
         double maxFocus = 1;
         for (auto& proc : allProcs) if (proc.focusCount > maxFocus) maxFocus = proc.focusCount;
         double freqScore = (p.focusCount / maxFocus) * 100.0;
+
         time_t now = time(nullptr);
         double secSinceUsed = difftime(now, p.lastUsedTime);
-        double recencyScore = max(0.0, 100.0 - (secSinceUsed / 3600.0));
+        // Use a much shorter window for recency (1 minute instead of 1 hour) to make it more dynamic
+        double recencyScore = max(0.0, 100.0 - (secSinceUsed / 0.6)); // 100 points dropped in 60 seconds
+
         double maxActive = 1;
         for (auto& proc : allProcs) if (proc.activeTimeMin > maxActive) maxActive = proc.activeTimeMin;
         double activeScore = (p.activeTimeMin / maxActive) * 100.0;
+
         double maxMem = 1;
         for (auto& proc : allProcs) if (proc.memoryMB > maxMem) maxMem = proc.memoryMB;
         double memScore = (p.memoryMB / maxMem) * 100.0;
-        double cpuScore = min(p.cpuPercent * 5.0, 100.0);
+
+        // Make CPU usage much more impactul on the score
+        double cpuScore = min(p.cpuPercent * 15.0, 100.0);
+
         p.hotnessScore = W_FREQUENCY * freqScore + W_RECENCY * recencyScore + W_ACTIVE * activeScore + W_MEMORY * memScore + W_CPU * cpuScore;
+
         if (p.hotnessScore >= HOT_THRESHOLD) p.classification = "HOT";
         else if (p.hotnessScore >= WARM_THRESHOLD) p.classification = "WARM";
         else p.classification = "COLD";
