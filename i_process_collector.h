@@ -4,6 +4,7 @@
 #include "data_structures.h"
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 /**
  * @brief Abstract interface for platform-specific process collection.
@@ -14,9 +15,10 @@ public:
 
     /**
      * @brief Collects live process data from the operating system.
+     * @param existingData Optional map of already known processes to maintain history.
      * @return Vector of ProcessData objects.
      */
-    virtual std::vector<ProcessData> collectLiveProcesses() = 0;
+    virtual std::vector<ProcessData> collectLiveProcesses(const std::unordered_map<int, ProcessData>* existingData = nullptr) = 0;
 
     /**
      * @brief Applies OS-level priority adjustments based on classification.

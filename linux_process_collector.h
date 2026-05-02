@@ -16,7 +16,7 @@
 
 class LinuxProcessCollector : public IProcessCollector {
 public:
-    std::vector<ProcessData> collectLiveProcesses() override {
+    std::vector<ProcessData> collectLiveProcesses(const std::unordered_map<int, ProcessData>* existingData = nullptr) override {
         std::vector<ProcessData> processes;
         DIR* dir = opendir("/proc");
         if (!dir) return processes;
@@ -29,10 +29,30 @@ public:
             // Check if directory name is a number (PID)
             if (entry->d_type == DT_DIR && isNumber(entry->d_name)) {
                 int pid = std::stoi(entry->d_name);
-                if (pid == 0) continue;
+                if (pid <= 0) continue;
 
                 ProcessData pd;
                 if (parseProcessStat(pid, pd, uptime, clk_tck)) {
+                    // Maintain history if exists
+                    if (existingData && existingData->count(pid)) {
+                        const ProcessData& old = existingData->at(pid);
+                        pd.focusCount = old.focusCount;
+                        pd.lastUsedTime = old.lastUsedTime;
+                        
+                        // If CPU is significant, consider it "used" or "focused"
+                        if (pd.cpuPercent > 1.0) {
+                            pd.lastUsedTime = time(nullptr);
+                            // Optionally increment focusCount slowly
+                            if (difftime(time(nullptr), old.lastUsedTime) > 10) {
+                                pd.focusCount++;
+                            }
+                        }
+                    } else {
+                        // Brand new process
+                        pd.focusCount = 1;
+                        pd.lastUsedTime = time(nullptr);
+                    }
+
                     processes.push_back(pd);
                 }
             }
@@ -82,31 +102,43 @@ private:
         std::string line;
         std::getline(file, line);
         
-        // Format of /proc/[pid]/stat:
-        // pid (comm) state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt utime stime cutime cstime priority nice num_threads itrealvalue starttime vsize rss rsslim ...
-        
+        // Find closing parenthesis of command name - it can contain spaces
+        std::size_t closeParen = line.find_last_of(')');
+        if (closeParen == std::string::npos) return false;
         std::size_t openParen = line.find('(');
-        std::size_t closeParen = line.find(')');
-        if (openParen == std::string::npos || closeParen == std::string::npos) return false;
+        if (openParen == std::string::npos) return false;
 
         pd.pid = pid;
         pd.name = line.substr(openParen + 1, closeParen - openParen - 1);
 
+        // Substring after ") " (the space after the name)
         std::string rest = line.substr(closeParen + 2);
         std::stringstream ss(rest);
         std::vector<std::string> tokens;
         std::string token;
         while (ss >> token) tokens.push_back(token);
 
-        if (tokens.size() < 20) return false;
+        // Now tokens start from 'state' (index 0)
+        if (tokens.size() < 22) return false; // up to rss
 
-        // 0: state, 1: ppid, ..., 7: flags, 8: minflt, 10: majflt, 12: utime, 13: stime, 17: priority, 18: nice, 19: num_threads, 21: starttime, 22: vsize, 23: rss
+        // /proc/[pid]/stat fields after name:
+        // 0: state
+        // 1: ppid
+        // ...
+        // 7: flags
+        // 8: minflt
+        // 10: majflt
+        // 12: utime
+        // 13: stime
+        // 21: starttime
+        // 22: vsize
+        // 23: rss
         
-        pd.pageFaultCount = std::stoul(tokens[8]) + std::stoul(tokens[10]); // minflt + majflt
+        pd.pageFaultCount = std::stoul(tokens[8]) + std::stoul(tokens[10]); 
         
         unsigned long long utime = std::stoull(tokens[12]);
         unsigned long long stime = std::stoull(tokens[13]);
-        unsigned long long starttime = std::stoull(tokens[21]);
+        unsigned long long starttime = std::stoull(tokens[17]); // Starttime is actually token 17 in the "rest" part
         
         double total_time = (double)(utime + stime) / clk_tck;
         double seconds = uptime - (starttime / clk_tck);
@@ -120,15 +152,15 @@ private:
         pd.activeTimeMin = seconds / 60.0;
         pd.startTime = time(nullptr) - (long)seconds;
 
-        pd.memoryMB = (std::stoull(tokens[23]) * getpagesize()) / (1024.0 * 1024.0); // RSS in pages
+        pd.memoryMB = 0;
+        try {
+            pd.memoryMB = (double)std::stoull(tokens[19]) * (4096.0 / (1024.0 * 1024.0)); // RSS is token 19
+        } catch (...) {}
         
-        // peakWorkingSetKB isn't directly in /proc/pid/stat, could get from /proc/pid/status VmPeak
-        // For now, use VSize / 1024
-        pd.peakWorkingSetKB = std::stoull(tokens[22]) / 1024.0;
-
-        // Simulate focus count and recency for now (as native focus detection is complex)
-        pd.focusCount = 1;
-        pd.lastUsedTime = time(nullptr);
+        pd.peakWorkingSetKB = 0;
+        try {
+            pd.peakWorkingSetKB = (double)std::stoull(tokens[18]) / 1024.0; // VSize is token 18
+        } catch (...) {}
 
         return true;
     }
