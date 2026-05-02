@@ -23,8 +23,8 @@ private:
     static constexpr double W_MEMORY     = 0.15;
     static constexpr double W_CPU        = 0.20;
 
-    static constexpr double HOT_THRESHOLD  = 40.0;
-    static constexpr double WARM_THRESHOLD = 15.0;
+    static constexpr double HOT_THRESHOLD  = 65.0;
+    static constexpr double WARM_THRESHOLD = 35.0;
 
     unique_ptr<IProcessCollector> collector;
 
@@ -70,6 +70,9 @@ public:
     }
 
     void collectAndStore() {
+        // Save history from previous run
+        unordered_map<int, ProcessData> historyMap = hashMap.getMap();
+
         hashMap.clear();
         maxHeap.clear();
         rbTree.clear();
@@ -80,7 +83,7 @@ public:
         pidToIndex.clear();
         indexToPid.clear();
 
-        vector<ProcessData> processes = collector->collectLiveProcesses();
+        vector<ProcessData> processes = collector->collectLiveProcesses(&historyMap);
 
         if (processes.empty()) return;
 
@@ -156,28 +159,35 @@ public:
     }
 
     void calculateScore(ProcessData& p, const vector<ProcessData>& allProcs) {
-        double maxFocus = 1;
+        // Find max memory in this snapshot for normalization
+        double maxMem = 1.0;
+        for (auto& proc : allProcs) if (proc.memoryMB > maxMem) maxMem = proc.memoryMB;
+
+        // 1. Frequency Score (based on focusCount history)
+        double maxFocus = 1.0;
         for (auto& proc : allProcs) if (proc.focusCount > maxFocus) maxFocus = proc.focusCount;
         double freqScore = (p.focusCount / maxFocus) * 100.0;
 
+        // 2. Recency Score (how recently it was active or used)
         time_t now = time(nullptr);
         double secSinceUsed = difftime(now, p.lastUsedTime);
-        // Use a much shorter window for recency (1 minute instead of 1 hour) to make it more dynamic
-        double recencyScore = max(0.0, 100.0 - (secSinceUsed / 0.6)); // 100 points dropped in 60 seconds
+        // This drops the score from 100 to 0 over 5 minutes (300 seconds)
+        double recencyScore = max(0.0, 100.0 - (secSinceUsed / 3.0)); 
 
-        double maxActive = 1;
-        for (auto& proc : allProcs) if (proc.activeTimeMin > maxActive) maxActive = proc.activeTimeMin;
-        double activeScore = (p.activeTimeMin / maxActive) * 100.0;
-
-        double maxMem = 1;
-        for (auto& proc : allProcs) if (proc.memoryMB > maxMem) maxMem = proc.memoryMB;
+        // 3. Resource Scores
         double memScore = (p.memoryMB / maxMem) * 100.0;
+        double cpuScore = min(p.cpuPercent * 10.0, 100.0); // 10% CPU = 100 points
 
-        // Make CPU usage much more impactul on the score
-        double cpuScore = min(p.cpuPercent * 15.0, 100.0);
+        // Weighted Calculation (W_ACTIVE is used for the longevity bonus below)
+        p.hotnessScore = (W_FREQUENCY * freqScore) + 
+                         (W_RECENCY * recencyScore) + 
+                         (W_MEMORY * memScore) + 
+                         (W_CPU * cpuScore);
+        
+        // 4. Longevity Bonus (Slowly build up score for long-running reliable processes)
+        if (p.activeTimeMin > 30.0) p.hotnessScore += (W_ACTIVE * 50.0); 
 
-        p.hotnessScore = W_FREQUENCY * freqScore + W_RECENCY * recencyScore + W_ACTIVE * activeScore + W_MEMORY * memScore + W_CPU * cpuScore;
-
+        // Classification based on updated thresholds
         if (p.hotnessScore >= HOT_THRESHOLD) p.classification = "HOT";
         else if (p.hotnessScore >= WARM_THRESHOLD) p.classification = "WARM";
         else p.classification = "COLD";
