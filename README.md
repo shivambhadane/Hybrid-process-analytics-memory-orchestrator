@@ -1,96 +1,131 @@
-# Adaptive OS Memory Engine (v1.0.0 Stable)
+# Adaptive OS Memory Engine (Version 2.0)
 
-A high-performance, real-time memory management and process optimization engine built for Linux. This engine implements a sophisticated tiered storage model (L1/L2/L3) to dynamically reallocate system resources based on process behavior, ensuring that mission-critical tasks always have the lowest latency access to RAM.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Platform: Linux](https://img.shields.io/badge/Platform-Linux-orange.svg)](https://www.linux.org/)
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows)
 
----
-
-## Full Implementation Overview
-
-The engine operates as a continuous monitor that intercepts system telemetry, scores every running process using a weighted algorithm, and then physically reorganizes how the OS treats those processes.
-
-### 1. Telemetry Collection (Linux Native)
-While the Windows version relies on the Windows API (WMI and Toolhelp32), the Linux version hooks directly into the kernel's virtual filesystem and POSIX standards:
-- **Process Data**: Reads from /proc/[pid]/stat for CPU timing and /proc/[pid]/status for physical memory (RSS).
-- **Process Control**: Uses the 'kill' system call to send SIGSTOP and SIGCONT signals for non-destructive process freezing.
-- **Priority Management**: Uses 'setpriority' to adjust process nice values (-20 to 19), a direct alternative to the Windows SetPriorityClass API.
-- **Terminal IO**: Uses termios.h and fcntl.h for raw keyboard input handling in the CLI.
-
-### 2. Weighted Hotness Algorithm
-Every process is assigned a Hotness Score (0-100) calculated across five dimensions:
-- **Frequency (20%)**: How often the process is accessed/focused.
-- **Recency (25%)**: How long since the process was last active (LRU logic).
-- **Active Time (20%)**: Total uptime vs. idle time.
-- **Memory (15%)**: Physical footprint (detects "Memory Hogs").
-- **CPU (20%)**: Real-time processing demand.
+Advanced Multi-Layer Storage & Process Scoring Engine that transitions from a Windows-based simulation to a **Native Linux System Utility**. It performs real-time telemetry, hotness scoring, and kernel-level process priority management.
 
 ---
 
-## Advanced Data Structures (The Engine Core)
-
-The engine uses a hybrid architecture of data structures to achieve O(1) and O(log n) performance:
-- **Red-Black Tree & Skip List**: Maintains a perfectly sorted ranking of all system processes at all times.
-- **Max-Heap (Pairing Heap)**: Used for instantaneous "Top-K" extraction and eviction of the "coldest" processes.
-- **Fenwick & Segment Trees**: Power the "Frequency Analysis" and "Time-Series" dashboards, allowing for range queries on process activity.
-- **LRU Cache (Doubly Linked List + Hash Map)**: Tracks the precise temporal order of process usage.
-- **Process Hash Map**: Our primary storage for O(1) process data retrieval by PID.
-
----
-
-## Linux vs. Windows 11 Version
-
-The Linux implementation is a significant architectural departure from the Windows reference:
-
-| Feature | Windows 11 Version (Qt GUI) | Linux CLI Version (High Performance) |
-| :--- | :--- | :--- |
-| **Interface** | Qt Widgets / GraphicsView | ANSI Terminal Dashboard |
-| **Telemetry API** | WMI / Toolhelp32 Snapshot | /proc Virtual Filesystem |
-| **Process Control** | TerminateProcess / SuspendThread | SIGSTOP (Freeze) and SIGCONT (Resume) |
-| **Scheduling** | SetPriorityClass / SetThreadPriority | setpriority() (Nice values) |
-| **Memory Model** | Virtual Memory HUD | Resident Set Size (RSS) Telemetry |
-| **Tiering** | Simulated UI Layers | Functional Tier-Sync with OS Priority |
-| **Overhead** | High (UI Rendering) | Near-Zero (<0.1% CPU) |
+## 📖 Table of Contents
+1. [Linux Core Architecture vs. Windows Simulation](#-linux-core-architecture-vs-windows-simulation)
+2. [Windows Version: Simulation-Based Architecture](#-windows-version-simulation-based-architecture)
+3. [Linux Version: Real System Control](#-linux-version-real-system-control)
+4. [Linux Kernel Integration & Telemetry](#-linux-kernel-integration--telemetry)
+5. [Permissions & Root Requirements](#-permissions--root-requirements)
+6. [Real Scheduler Control](#-real-scheduler-control)
+7. [Installation & Build Instructions](#-installation--build-instructions)
+8. [Usage Guide](#-usage-guide)
+9. [Final Comparison Table](#-final-comparison-table)
 
 ---
 
-## Memory Waste Management
+## 🧠 Linux Core Architecture vs. Windows Simulation
 
-The engine identifies processes that are classified as COLD but occupy >100MB of RAM.
-- **Demotion**: Automatically moved to L3 DISK (simulated high-latency swap).
-- **Supression**: Assigned the lowest execution priority to prevent cache-line pollution.
+The **Adaptive OS Memory Engine** was originally conceived as a monitor for Windows 11. However, while Windows provided visibility, it lacked the deterministic control required for a "Memory Engine" to truly manage system resources. The migration to Linux transforms this project from an **Intelligent Simulation** into a **Real System Control Engine**.
+
+### Windows Version: Simulation-Based Architecture
+The Windows version focused on:
+*   **Observation:** Collecting metrics using \`psapi.h\` and \`tlhelp32.h\`.
+*   **Automation:** Recommending movements based on calculated Scores.
+*   **Limitations:** The Windows scheduler (NT Kernel) maintains tight internal controls (\`Dynamic Priority Boosting\`, \`Efficiency Mode\`). Even when using \`SetPriorityClass()\`, the OS often overrides user-engine decisions to favor foreground apps or power saving.
+*   **Verdict:** Functioned as an **Analytics Engine**.
+
+### Linux Version: Real System Control
+In Linux, the architecture fundamentally changed. By interacting directly with the \`/proc\` filesystem and the Linux Scheduler, the engine can:
+*   **Control CPU Scheduling:** Using \`setpriority()\` with root authority.
+*   **Kernel Signals:** Using \`SIGSTOP\` and \`SIGCONT\` for physical process suspension.
+*   **Swap Visibility:** Reading \`VmSwap\` directly to see real-world memory pressure.
+*   **Verdict:** Functions as a **Real System Controller**.
 
 ---
 
-## Building and Running
+## 🛠 Linux Kernel Integration & Telemetry
+
+Linux exposes low-level process information through the \`/proc\` pseudo-filesystem.
+
+### 1. Process Telemetry (\`/proc/[pid]/\`)
+*   **\`/proc/[pid]/stat\`**: Used for CPU ticks, process runtime, and page fault behavior. This allows the engine to detect exactly how "active" a process is.
+*   **\`/proc/[pid]/status\`**: Exposes \`RSS\` (Resident Set Size), \`VmPeak\`, and \`VmSwap\`. The engine uses \`VmSwap\` to detect when a process has been "cold" long enough for the kernel to move it to disk.
+
+### 2. Permissions & Root Requirements
+Linux follows the **Least Privilege Principle**. 
+*   **Normal User:** Can monitor processes and "demote" them (increase niceness).
+*   **Root (sudo):** Required for "promoting" processes (decreasing niceness below 0). 
+    *   *Why?* To prevent CPU starvation where every app tries to make itself the highest priority.
+
+---
+
+## 🚀 Real Scheduler Control
+
+### Priority Control (Niceness)
+The engine maps its **Hotness Score** to Linux Niceness values (-20 to +19):
+*   **HOT Processes:** Receive a Niceness of roughly **-5 to -10**, giving them higher scheduling weight.
+*   **COLD Processes:** Receive a Niceness of **+10 to +15**, drastically reducing their CPU slice.
+
+### Execution Control
+The engine can physically pause "Frozen" processes:
+*   \`kill(pid, SIGSTOP)\`: Immediately stops kernel scheduling for that process.
+*   \`kill(pid, SIGCONT)\`: Resumes execution.
+
+---
+
+## 🛠 Installation & Build Instructions
 
 ### Prerequisites
-- **Compiler**: g++ (C++17 or higher)
-- **Build System**: cmake (3.10+)
-- **OS**: Linux (Tested on Ubuntu/Debian/Arch)
+*   **Linux OS** (Ubuntu/Debian recommended) or Windows (for simulation only).
+*   **GCC/G++** (C++17 support).
+*   **CMake** (3.10+).
+*   **Qt5** (Widgets, Core, Gui) for the Visualizer.
 
-### Setup
-```bash
+### Build Steps (Linux)
+\`\`\`bash
 # Clone the repository
 git clone https://github.com/shivambhadane729/-Multi-Layer-Storage-Engine.git
-cd adaptive-os-memory-engine
+cd -Multi-Layer-Storage-Engine
 
-# Build
-rm -rf build && mkdir build 
-cmake -S . -B build
-cmake --build build
-```
+# Create build directory
+mkdir build && cd build
 
-### Execution
-The engine requires Root Privileges to manipulate process priorities and signals:
-```bash
-sudo ./build/analyzer_cli
-```
+# Configure and Compile
+cmake ..
+make
+\`\`\`
 
 ---
 
-## Interactive Controls
-- **M**: Main Dashboard - Real-time view of every process and its rank.
-- **W**: Waste Analysis - View which processes are being suppressed to save RAM.
-- **D**: DS Engine - View internal statistics of the RB-Tree, Skip-List, and Heap.
-- **L**: Layer View - See the distribution across L1 Cache, L2 SSD, and L3 Disk.
-- **Q**: Quit - Safely exit and restore system defaults.
+## 📖 Usage Guide
 
+### Running the CLI Engine
+The CLI provides a top-like interface for real-time monitoring:
+\`\`\`bash
+sudo ./build/analyzer_cli
+\`\`\`
+
+### Running the GUI Visualizer
+To launch the full dashboard with Data Structure visualizations:
+\`\`\`bash
+# Ensure you are in the project root
+chmod +x scripts/run_gui.sh
+sudo ./scripts/run_gui.sh
+\`\`\`
+
+---
+
+## 📊 Final Comparison Table
+
+| Feature | Windows Version | Linux Version |
+| :--- | :--- | :--- |
+| **Data Source** | Windows APIs (\`psapi.h\`) | \`/proc\` Kernel Filesystem |
+| **CPU Priority** | API Request (Soft) | Native Scheduler Control (Hard) |
+| **Process Suspension**| Thread-based APIs | Kernel Signals (\`SIGSTOP\`) |
+| **Memory Visibility** | Abstracted | Direct \`VmSwap\` access |
+| **Scheduler Access** | Indirect | Native syscalls (\`setpriority\`) |
+| **Privilege Model** | Admin | Root / \`CAP_SYS_NICE\` |
+| **Project Type** | **Simulation Engine** | **Real System Controller** |
+
+---
+
+## 🏁 Conclusion
+The migration to Linux represents the evolution from an abstract model to a functional **Adaptive Kernel-Aware Resource Management Engine**. It doesn't just suggest how to optimize your system—it actively manages the Linux Kernel scheduler to ensure your most important tasks always have the priority they deserve.
