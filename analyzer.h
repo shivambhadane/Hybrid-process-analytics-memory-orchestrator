@@ -12,19 +12,19 @@
 #include <cmath>
 #include <numeric>
 #include <memory>
+#include <algorithm>
 
 using namespace std;
 
 class Analyzer {
 private:
-    static constexpr double W_FREQUENCY  = 0.20;
-    static constexpr double W_RECENCY    = 0.25;
-    static constexpr double W_ACTIVE     = 0.20;
-    static constexpr double W_MEMORY     = 0.15;
-    static constexpr double W_CPU        = 0.20;
+    static constexpr double W_FREQUENCY  = 0.30;
+    static constexpr double W_RECENCY    = 0.20;
+    static constexpr double W_MEMORY     = 0.25;
+    static constexpr double W_CPU        = 0.25;
 
-    static constexpr double HOT_THRESHOLD  = 65.0;
-    static constexpr double WARM_THRESHOLD = 35.0;
+    static constexpr double HOT_THRESHOLD  = 60.0;
+    static constexpr double WARM_THRESHOLD = 30.0;
 
     unique_ptr<IProcessCollector> collector;
 
@@ -46,7 +46,6 @@ public:
     unordered_map<int, string> manualOverrides;
     int lastActionPid = -1;
 
-    // GUI compatibility properties
     struct ImpactData {
         int pid;
         string processName;
@@ -70,7 +69,6 @@ public:
     }
 
     void collectAndStore() {
-        // Save history from previous run
         unordered_map<int, ProcessData> historyMap = hashMap.getMap();
 
         hashMap.clear();
@@ -87,14 +85,23 @@ public:
 
         if (processes.empty()) return;
 
+        // Calculate scores before sorting
+        calculateAllScores(processes);
+
         sort(processes.begin(), processes.end(), [](const ProcessData& a, const ProcessData& b) {
-            return a.focusCount > b.focusCount;
+            return a.hotnessScore > b.hotnessScore;
         });
 
         int idx = 0;
         for (auto& p : processes) {
             pidToIndex[p.pid] = idx;
             indexToPid.push_back(p.pid);
+            
+            hashMap.insert(p.pid, p);
+            collector->applySystemPriority(p.pid, p.classification);
+            lruList.access(p);
+            rbTree.insert(p);
+            skipList.insert(p);
             idx++;
         }
 
@@ -103,50 +110,42 @@ public:
         for (int i = 0; i < (int)processes.size(); i++) timeSlots[i] = processes[i].activeTimeMin;
         segTree.build(timeSlots);
 
-        for (auto& p : processes) {
-            int fi = pidToIndex[p.pid] + 1;
-            fenwickTree.update(fi, p.focusCount);
-            calculateScore(p, processes);
-            hashMap.insert(p.pid, p);
-            collector->applySystemPriority(p.pid, p.classification);
-            lruList.access(p);
+        maxHeap.buildFromVector(processes);
+        storageEngine.classifyAndDistribute(processes);
+
+        for (auto& pair : manualOverrides) {
+            string error;
+            storageEngine.moveProcess(pair.first, pair.second, error, &hashMap.getMap());
         }
 
-        vector<ProcessData> allProcs = hashMap.getAll();
-        maxHeap.buildFromVector(allProcs);
-        for (auto& p : allProcs) {
-            rbTree.insert(p);
-            skipList.insert(p);
-        }
-
-        storageEngine.classifyAndDistribute(allProcs);
         storageEngine.syncLayerToHashMap(hashMap.getMap());
-        syncAllDataStructures();
     }
 
-    // --- GUI Helper Methods ---
-    bool hasData() { return !hashMap.empty(); }
-    vector<ProcessData> getAllProcesses() { return hashMap.getAll(); }
-    vector<ProcessData> getTopK(int k) { return maxHeap.getTopK(k); }
-    vector<ProcessData> getSortedRBTree() { return rbTree.topK((int)rbTree.size()); }
-    vector<ProcessData> getSortedSkipList() { return skipList.getSorted(); }
-    vector<ProcessData> getRecencyOrder() { return lruList.getRecencyOrder(); }
-    string findProcessLayer(int pid) { return storageEngine.findProcessLayer(pid); }
-    int getCumulativeFrequency(int n) { return fenwickTree.query(n); }
+    void calculateAllScores(vector<ProcessData>& processes) {
+        double maxMem = 1.0;
+        double maxFocus = 1.0;
+        for (const auto& p : processes) {
+            if (p.memoryMB > maxMem) maxMem = p.memoryMB;
+            if (p.focusCount > maxFocus) maxFocus = (double)p.focusCount;
+        }
 
-    void getRecommendations(vector<ProcessData>& keepHigh, vector<ProcessData>& deprioritize) {
-        keepHigh = getTopK(3);
-        vector<ProcessData> all = hashMap.getAll();
-        sort(all.begin(), all.end(), [](const ProcessData& a, const ProcessData& b) { return a.hotnessScore < b.hotnessScore; });
-        for (int i = 0; i < min((int)all.size(), 3); i++) deprioritize.push_back(all[i]);
-    }
+        time_t now = time(nullptr);
+        for (auto& p : processes) {
+            double freqScore = ((double)p.focusCount / maxFocus) * 100.0;
+            double secSinceUsed = difftime(now, p.lastUsedTime);
+            double recencyScore = max(0.0, 100.0 - (secSinceUsed / 6.0)); 
+            double memScore = (p.memoryMB / maxMem) * 100.0;
+            double cpuScore = min(p.cpuPercent * 5.0, 100.0);
 
-    vector<ProcessData> getMemoryWaste() {
-        vector<ProcessData> waste;
-        for (auto& p : hashMap.getAll()) if (p.classification == "COLD" && p.memoryMB > 100) waste.push_back(p);
-        sort(waste.begin(), waste.end(), [](const ProcessData& a, const ProcessData& b) { return a.memoryMB > b.memoryMB; });
-        if (waste.size() > 5) waste.resize(5);
-        return waste;
+            p.hotnessScore = (W_FREQUENCY * freqScore) + 
+                             (W_RECENCY * recencyScore) + 
+                             (W_MEMORY * memScore) + 
+                             (W_CPU * cpuScore);
+
+            if (p.hotnessScore >= HOT_THRESHOLD) p.classification = "HOT";
+            else if (p.hotnessScore >= WARM_THRESHOLD) p.classification = "WARM";
+            else p.classification = "COLD";
+        }
     }
 
     static string cleanName(const string& name) {
@@ -158,46 +157,47 @@ public:
         return clean;
     }
 
-    void calculateScore(ProcessData& p, const vector<ProcessData>& allProcs) {
-        // Find max memory in this snapshot for normalization
-        double maxMem = 1.0;
-        for (auto& proc : allProcs) if (proc.memoryMB > maxMem) maxMem = proc.memoryMB;
-
-        // 1. Frequency Score (based on focusCount history)
-        double maxFocus = 1.0;
-        for (auto& proc : allProcs) if (proc.focusCount > maxFocus) maxFocus = proc.focusCount;
-        double freqScore = (p.focusCount / maxFocus) * 100.0;
-
-        // 2. Recency Score (how recently it was active or used)
-        time_t now = time(nullptr);
-        double secSinceUsed = difftime(now, p.lastUsedTime);
-        // This drops the score from 100 to 0 over 5 minutes (300 seconds)
-        double recencyScore = max(0.0, 100.0 - (secSinceUsed / 3.0)); 
-
-        // 3. Resource Scores
-        double memScore = (p.memoryMB / maxMem) * 100.0;
-        double cpuScore = min(p.cpuPercent * 10.0, 100.0); // 10% CPU = 100 points
-
-        // Weighted Calculation (W_ACTIVE is used for the longevity bonus below)
-        p.hotnessScore = (W_FREQUENCY * freqScore) + 
-                         (W_RECENCY * recencyScore) + 
-                         (W_MEMORY * memScore) + 
-                         (W_CPU * cpuScore);
-        
-        // 4. Longevity Bonus (Slowly build up score for long-running reliable processes)
-        if (p.activeTimeMin > 30.0) p.hotnessScore += (W_ACTIVE * 50.0); 
-
-        // Classification based on updated thresholds
-        if (p.hotnessScore >= HOT_THRESHOLD) p.classification = "HOT";
-        else if (p.hotnessScore >= WARM_THRESHOLD) p.classification = "WARM";
-        else p.classification = "COLD";
+    bool manualRelocate(int pid, const string& targetLayer) {
+        string error;
+        bool ok = storageEngine.moveProcess(pid, targetLayer, error, &hashMap.getMap());
+        if (ok) {
+            manualOverrides[pid] = targetLayer;
+            RelocationImpact impact = storageEngine.getRelocationImpact(pid, targetLayer);
+            lastImpact.pid = pid;
+            lastImpact.processName = cleanName(hashMap.getMap()[pid].name);
+            lastImpact.action = "MOVE TO " + targetLayer;
+            lastImpact.reason = "Manual override";
+            lastImpact.speedupFactor = impact.speedupFactor;
+            lastImpact.verdict = impact.verdict;
+            lastImpact.latencyBefore = impact.latencyBefore;
+            lastImpact.latencyAfter = impact.latencyAfter;
+            lastImpact.hitRateBefore = impact.hitRateBefore;
+            lastImpact.hitRateAfter = impact.hitRateAfter;
+            hasLastImpact = true;
+        }
+        return ok;
     }
 
-    void syncAllDataStructures() {
-        vector<ProcessData> all = hashMap.getAll();
-        maxHeap.buildFromVector(all);
-        rbTree.clear(); skipList.clear();
-        for (auto& p : all) { rbTree.insert(p); skipList.insert(p); }
+    bool hasData() { return !hashMap.empty(); }
+    vector<ProcessData> getAllProcesses() { return hashMap.getAll(); }
+    vector<ProcessData> getTopK(int k) { return maxHeap.getTopK(k); }
+    vector<ProcessData> getSortedRBTree() { return rbTree.topK((int)rbTree.size()); }
+    vector<ProcessData> getSortedSkipList() { return skipList.getSorted(); }
+    vector<ProcessData> getRecencyOrder() { return lruList.getRecencyOrder(); }
+    
+    vector<ProcessData> getMemoryWaste() {
+        vector<ProcessData> waste;
+        for (auto& p : hashMap.getAll()) {
+            if (p.classification == "COLD" && p.memoryMB > 50.0) waste.push_back(p);
+        }
+        sort(waste.begin(), waste.end(), [](const ProcessData& a, const ProcessData& b) { return a.memoryMB > b.memoryMB; });
+        return waste;
+    }
+
+    vector<ProcessData> getByClassification(string cls) {
+        vector<ProcessData> res;
+        for (auto& p : hashMap.getAll()) if (p.classification == cls) res.push_back(p);
+        return res;
     }
 
     ProcessHashMap& getHashMap() { return hashMap; }
@@ -205,11 +205,8 @@ public:
     RBTreeRanking& getRBTree() { return rbTree; }
     SkipList& getSkipList() { return skipList; }
     LRUList& getLRUList() { return lruList; }
-    SegmentTree& getSegTree() { return segTree; }
-    FenwickTree& getFenwickTree() { return fenwickTree; }
-
+    
     bool freezeProcess(int pid) { return collector->freezeProcess(pid); }
     bool resumeProcess(int pid) { return collector->resumeProcess(pid); }
 };
-
 #endif
