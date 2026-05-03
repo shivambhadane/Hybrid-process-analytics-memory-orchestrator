@@ -1,9 +1,5 @@
 # Adaptive OS Memory Engine (Version 2.0)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Platform: Linux](https://img.shields.io/badge/Platform-Linux-orange.svg)](https://www.linux.org/)
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows)
-
 Advanced Multi-Layer Storage and Process Scoring Engine that transitions from a Windows-based simulation to a Native Linux System Utility. It performs real-time telemetry, hotness scoring, and kernel-level process priority management.
 
 ---
